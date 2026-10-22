@@ -1,0 +1,287 @@
+openapi: 3.0.3
+info:
+  title: EMBLAZE Backend API
+  version: 1.0.0
+  description: |
+    REST API of the EMBLAZE online store backend (Node.js, Express, MySQL).
+    The API is run with Docker Compose and is reachable at http://localhost:3000.
+
+    **Source of this document:** the routes implemented in `database/server.js`.
+    The documented responses are the ones the code actually returns.
+
+    **Conventions**
+    - Request bodies are JSON (`Content-Type: application/json`). The server also parses
+      `application/x-www-form-urlencoded`.
+    - Passwords are hashed with bcrypt (10 salt rounds) and are never returned in a response.
+    - CORS is enabled for all origins.
+    - The API has no authentication token. A successful login returns the `user_id` only.
+
+    **Known limitations of version 1.0.0 (relevant for testing)**
+    - There is no server-side input validation. Missing fields, wrong data types, and
+      out-of-range values are not rejected with 400 and may produce a 500 response or an
+      unhandled error.
+    - A duplicate username is reported as a generic 500 error, not as 409.
+    - `POST /api/orders` does not check that the user or the products exist beyond the
+      database foreign keys, and it trusts `price_at_purchase` sent by the client.
+  contact:
+    name: EMBLAZE group (Information Systems, IS 2026)
+servers:
+  - url: http://localhost:3000
+    description: Local Docker Compose environment (backend published on port 3000)
+tags:
+  - name: Health
+    description: Server availability check
+  - name: Authentication
+    description: User registration and login
+  - name: Orders
+    description: Checkout
+paths:
+  /api/status:
+    get:
+      tags: [Health]
+      summary: Check that the backend is online
+      description: Returns a fixed message. It does not query the database.
+      operationId: getStatus
+      responses:
+        '200':
+          description: Server is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: "Backend Emblaze is Online! 🟢"
+  /api/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new user
+      description: |
+        Hashes the password with bcrypt and inserts the user into the `users` table.
+        `username` must be unique.
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              username: qa_user01
+              password: Passw0rd!23
+              email: qa_user01@mail.test
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: User registered successfully!
+        '500':
+          description: |
+            Registration failed. Two cases are possible:
+            - Duplicate username or database error (JSON message).
+            - Password hashing failed, for example when `password` is missing or not a string
+              (plain text `Error hashing`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Username sudah ada atau error database!
+            text/plain:
+              schema:
+                type: string
+              example: Error hashing
+  /api/login:
+    post:
+      tags: [Authentication]
+      summary: Log in with username and password
+      description: |
+        Looks up the user by `username` and compares the password with the stored bcrypt hash.
+        On success the response contains the user id, which the frontend sends to `/api/orders`.
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: qa_user01
+              password: Passw0rd!23
+      responses:
+        '200':
+          description: Credentials are correct
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginSuccess'
+              example:
+                message: Login successful!
+                user_id: 3
+        '401':
+          description: Username exists but the password is wrong
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Password salah!
+        '404':
+          description: Username not found (also returned when the database query fails)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: User not found!
+  /api/orders:
+    post:
+      tags: [Orders]
+      summary: Create an order (checkout)
+      description: |
+        Creates a row in `orders` for `user_id`, then inserts one row in `order_items`
+        for every element of `cart_items`. `user_id` and every `product_id` must reference
+        existing rows because of the database foreign keys.
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderRequest'
+            example:
+              user_id: 3
+              cart_items:
+                - product_id: 1
+                  quantity: 1
+                  price_at_purchase: 150000
+                - product_id: 2
+                  quantity: 2
+                  price_at_purchase: 50000
+      responses:
+        '201':
+          description: Order and order items stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderCreated'
+              example:
+                message: Order masuk ke database 3NF!
+                orderId: 12
+        '400':
+          description: '`cart_items` is missing, null, or an empty array'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Keranjang kosong!
+        '500':
+          description: |
+            Database error. The message tells which step failed:
+            the parent order could not be created, or the items could not be saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                orderFailed:
+                  summary: Parent order could not be created
+                  value:
+                    message: Gagal membuat order induk.
+                itemsFailed:
+                  summary: Order items could not be saved
+                  value:
+                    message: Gagal menyimpan item belanjaan.
+components:
+  schemas:
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+      required: [message]
+    RegisterRequest:
+      type: object
+      required: [username, password, email]
+      properties:
+        username:
+          type: string
+          maxLength: 255
+          description: Must be unique (column `users.username`, VARCHAR 255).
+          example: qa_user01
+        password:
+          type: string
+          description: Stored as a bcrypt hash. bcrypt only uses the first 72 bytes.
+          example: Passw0rd!23
+        email:
+          type: string
+          maxLength: 255
+          description: Stored as sent (VARCHAR 255). The format is not validated by the server.
+          example: qa_user01@mail.test
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: qa_user01
+        password:
+          type: string
+          example: Passw0rd!23
+    LoginSuccess:
+      type: object
+      required: [message, user_id]
+      properties:
+        message:
+          type: string
+          example: Login successful!
+        user_id:
+          type: integer
+          description: Id of the logged-in user (`users.id`).
+          example: 3
+    CartItem:
+      type: object
+      required: [product_id, quantity, price_at_purchase]
+      properties:
+        product_id:
+          type: integer
+          description: Must exist in `products.id`.
+          example: 1
+        quantity:
+          type: integer
+          default: 1
+          description: Column `order_items.quantity` (INT, default 1).
+          example: 2
+        price_at_purchase:
+          type: number
+          format: double
+          description: Unit price when bought (DECIMAL 10,2). Sent by the client.
+          example: 150000
+    OrderRequest:
+      type: object
+      required: [user_id, cart_items]
+      properties:
+        user_id:
+          type: integer
+          description: Must exist in `users.id`.
+          example: 3
+        cart_items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CartItem'
+    OrderCreated:
+      type: object
+      required: [message, orderId]
+      properties:
+        message:
+          type: string
+          example: Order masuk ke database 3NF!
+        orderId:
+          type: integer
+          description: Id of the new row in `orders`.
+          example: 12
